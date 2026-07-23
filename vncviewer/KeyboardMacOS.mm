@@ -421,7 +421,10 @@ uint32_t KeyboardMacOS::translateToKeySym(unsigned keyCode,
       return kvk_map[i][1];
   }
 
-  keyboard = TISCopyCurrentKeyboardLayoutInputSource();
+  keyboard = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+  if (keyboard == nullptr)
+    return NoSymbol;
+
   uchr = (CFDataRef)TISGetInputSourceProperty(keyboard,
                                               kTISPropertyUnicodeKeyLayoutData);
   if (uchr == nullptr)

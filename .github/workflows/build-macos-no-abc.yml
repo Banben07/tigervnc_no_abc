@@ -1,0 +1,320 @@
+name: Build TigerVNC no-ABC for macOS
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apple-silicon:
+    name: Build Apple Silicon
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    env:
+      TARGET_ARCH: arm64
+      ARTIFACT_NAME: TigerVNC-macOS-Apple-Silicon-no-ABC
+
+    steps:
+      - name: Check out patched fork
+        uses: actions/checkout@v6
+
+      - name: Verify no-ABC source patch
+        run: |
+          set -euxo pipefail
+
+          grep -q \
+            "TISCopyCurrentASCIICapableKeyboardLayoutInputSource" \
+            vncviewer/KeyboardMacOS.mm
+
+          if grep -q \
+            "TISCopyCurrentKeyboardLayoutInputSource" \
+            vncviewer/KeyboardMacOS.mm; then
+            echo "The old keyboard-layout lookup is still present."
+            exit 1
+          fi
+
+          echo "Building source revision:"
+          git rev-parse HEAD
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+
+          brew install \
+            cmake \
+            fltk@1.3 \
+            pixman \
+            ffmpeg \
+            gnutls \
+            nettle \
+            gmp \
+            googletest \
+            gettext \
+            jpeg-turbo \
+            dylibbundler
+
+          brew link --overwrite fltk@1.3
+
+      - name: Configure TigerVNC
+        run: |
+          set -euxo pipefail
+
+          CMAKE_PREFIXES="$(
+            printf '%s;' \
+              "$(brew --prefix fltk@1.3)" \
+              "$(brew --prefix pixman)" \
+              "$(brew --prefix ffmpeg)" \
+              "$(brew --prefix gnutls)" \
+              "$(brew --prefix nettle)" \
+              "$(brew --prefix gmp)" \
+              "$(brew --prefix gettext)" \
+              "$(brew --prefix jpeg-turbo)" \
+              "$(brew --prefix googletest)"
+          )"
+
+          cmake \
+            -S . \
+            -B build \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$TARGET_ARCH" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_PREFIX_PATH="$CMAKE_PREFIXES" \
+            -DBUILD_VIEWER=ON \
+            -DBUILD_JAVA=OFF \
+            -DENABLE_NLS=ON \
+            -DENABLE_H264=ON \
+            -DENABLE_GNUTLS=ON \
+            -DENABLE_NETTLE=ON \
+            -DENABLE_WAYLAND=OFF
+
+      - name: Build TigerVNC DMG
+        run: |
+          set -euxo pipefail
+
+          cmake --build build --target dmg --parallel 3
+
+          BINARY="build/vncviewer/vncviewer"
+          test -f "$BINARY"
+
+          file "$BINARY"
+          lipo -archs "$BINARY" |
+            tr ' ' '\n' |
+            grep -qx "$TARGET_ARCH"
+
+      - name: Create portable signed DMG
+        run: |
+          set -euxo pipefail
+
+          VERSION="$(
+            sed -n \
+              's/^set(VERSION \([^)]*\)).*/\1/p' \
+              CMakeLists.txt |
+            head -n 1
+          )"
+
+          ORIGINAL_DMG="$(
+            find build/release \
+              -maxdepth 1 \
+              -name 'TigerVNC-*.dmg' \
+              -print \
+              -quit
+          )"
+
+          test -n "$VERSION"
+          test -f "$ORIGINAL_DMG"
+
+          OUTPUT_DIR="$GITHUB_WORKSPACE/output"
+          MOUNT_DIR="$RUNNER_TEMP/tigervnc-dmg-mount"
+          PACKAGE_DIR="$RUNNER_TEMP/tigervnc-package"
+
+          mkdir -p "$OUTPUT_DIR" "$MOUNT_DIR" "$PACKAGE_DIR"
+
+          hdiutil attach \
+            "$ORIGINAL_DMG" \
+            -mountpoint "$MOUNT_DIR" \
+            -nobrowse \
+            -readonly
+
+          detach_image() {
+            hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true
+          }
+          trap detach_image EXIT
+
+          test -d "$MOUNT_DIR/TigerVNC.app"
+          ditto \
+            "$MOUNT_DIR/TigerVNC.app" \
+            "$PACKAGE_DIR/TigerVNC.app"
+
+          if [ -f "$MOUNT_DIR/LICENCE.TXT" ]; then
+            ditto \
+              "$MOUNT_DIR/LICENCE.TXT" \
+              "$PACKAGE_DIR/LICENCE.TXT"
+          fi
+
+          if [ -f "$MOUNT_DIR/README.rst" ]; then
+            ditto \
+              "$MOUNT_DIR/README.rst" \
+              "$PACKAGE_DIR/README.rst"
+          fi
+
+          hdiutil detach "$MOUNT_DIR"
+          trap - EXIT
+
+          APP="$PACKAGE_DIR/TigerVNC.app"
+          EXECUTABLE="$APP/Contents/MacOS/vncviewer"
+          LIBRARY_DIR="$APP/Contents/libs"
+
+          test -f "$EXECUTABLE"
+
+          (
+            cd "$PACKAGE_DIR"
+
+            dylibbundler \
+              --overwrite-dir \
+              --bundle-deps \
+              --fix-file \
+              "TigerVNC.app/Contents/MacOS/vncviewer" \
+              --dest-dir \
+              "TigerVNC.app/Contents/libs" \
+              --install-path \
+              "@executable_path/../libs/"
+          )
+
+          if [ -d "$LIBRARY_DIR" ]; then
+            while IFS= read -r -d '' library; do
+              codesign \
+                --force \
+                --sign - \
+                --timestamp=none \
+                "$library"
+            done < <(
+              find "$LIBRARY_DIR" \
+                -type f \
+                -name '*.dylib' \
+                -print0
+            )
+          fi
+
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            "$EXECUTABLE"
+
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            --timestamp=none \
+            "$APP"
+
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=2 \
+            "$APP"
+
+          ARCHITECTURE_REPORT="$OUTPUT_DIR/architecture.txt"
+          DEPENDENCY_REPORT="$OUTPUT_DIR/dependencies.txt"
+
+          : > "$ARCHITECTURE_REPORT"
+          : > "$DEPENDENCY_REPORT"
+
+          check_binary() {
+            binary="$1"
+
+            echo "Binary: $binary" |
+              tee -a "$ARCHITECTURE_REPORT"
+
+            file "$binary" |
+              tee -a "$ARCHITECTURE_REPORT"
+
+            lipo -archs "$binary" |
+              tee -a "$ARCHITECTURE_REPORT" |
+              tr ' ' '\n' |
+              grep -qx "$TARGET_ARCH"
+
+            {
+              echo "Binary: $binary"
+              otool -L "$binary"
+              otool -l "$binary"
+              echo
+            } >> "$DEPENDENCY_REPORT"
+          }
+
+          check_binary "$EXECUTABLE"
+
+          if [ -d "$LIBRARY_DIR" ]; then
+            while IFS= read -r -d '' library; do
+              check_binary "$library"
+            done < <(
+              find "$LIBRARY_DIR" \
+                -type f \
+                -name '*.dylib' \
+                -print0
+            )
+          fi
+
+          if grep -E \
+            '/opt/homebrew|/usr/local|/opt/local' \
+            "$DEPENDENCY_REPORT"; then
+            echo "A package-manager path remains in the app."
+            exit 1
+          fi
+
+          set +e
+          "$EXECUTABLE" -h \
+            > "$OUTPUT_DIR/smoke-test.txt" \
+            2>&1
+          SMOKE_STATUS=$?
+          set -e
+
+          echo "Smoke-test exit status: $SMOKE_STATUS"
+
+          if ! grep -q "TigerVNC" "$OUTPUT_DIR/smoke-test.txt"; then
+            cat "$OUTPUT_DIR/smoke-test.txt"
+            echo "TigerVNC did not produce the expected help output."
+            exit 1
+          fi
+
+          FINAL_DMG="$OUTPUT_DIR/${ARTIFACT_NAME}-${VERSION}.dmg"
+
+          hdiutil create \
+            -fs HFS+ \
+            -format UDZO \
+            -volname "TigerVNC-${VERSION}-no-ABC" \
+            -srcfolder "$PACKAGE_DIR" \
+            "$FINAL_DMG"
+
+          printf '%s\n' "$VERSION" \
+            > "$OUTPUT_DIR/VERSION.txt"
+
+          git rev-parse HEAD \
+            > "$OUTPUT_DIR/source-revision.txt"
+
+          grep -n \
+            "TISCopyCurrent.*KeyboardLayoutInputSource" \
+            vncviewer/KeyboardMacOS.mm \
+            > "$OUTPUT_DIR/keyboard-layout-patch.txt"
+
+          (
+            cd "$OUTPUT_DIR"
+            shasum -a 256 \
+              "$(basename "$FINAL_DMG")" \
+              > SHA256SUMS.txt
+          )
+
+          ls -lh "$OUTPUT_DIR"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
