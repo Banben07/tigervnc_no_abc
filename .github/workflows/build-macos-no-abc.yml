@@ -203,17 +203,24 @@ jobs:
           (
             cd "$FLTK_SOURCE"
 
-            MACOSX_DEPLOYMENT_TARGET=15.0 \
-            CPPFLAGS="$(
-              printf '%s ' \
-                "-I$(brew --prefix jpeg-turbo)/include" \
-                "-I$(brew --prefix libpng)/include"
-            )" \
-            LDFLAGS="$(
-              printf '%s ' \
-                "-L$(brew --prefix jpeg-turbo)/lib" \
-                "-L$(brew --prefix libpng)/lib"
-            )" \
+            JPEG_PREFIX="$(brew --prefix jpeg-turbo)"
+            PNG_PREFIX="$(brew --prefix libpng)"
+
+            export MACOSX_DEPLOYMENT_TARGET=15.0
+            export CPPFLAGS="\
+          -I$JPEG_PREFIX/include \
+          -I$PNG_PREFIX/include"
+            export LDFLAGS="\
+          -L$JPEG_PREFIX/lib \
+          -L$PNG_PREFIX/lib"
+
+            # FLTK's shared-library rule does not include LDFLAGS.
+            # Clang also searches LIBRARY_PATH when resolving -lpng and
+            # -ljpeg, so keep it exported for both configure and make.
+            export LIBRARY_PATH="\
+          $JPEG_PREFIX/lib:\
+          $PNG_PREFIX/lib"
+
             ./configure \
               --prefix="$FLTK_PREFIX" \
               --enable-threads \
