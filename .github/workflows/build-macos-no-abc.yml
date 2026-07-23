@@ -16,6 +16,7 @@ jobs:
     env:
       TARGET_ARCH: arm64
       ARTIFACT_NAME: TigerVNC-macOS-Apple-Silicon-no-ABC
+      FLTK_PREFIX: ${{ runner.temp }}/fltk-patched
 
     steps:
       - name: Check out patched fork
@@ -45,7 +46,6 @@ jobs:
 
           brew install \
             cmake \
-            fltk@1.3 \
             pixman \
             ffmpeg \
             gnutls \
@@ -54,9 +54,129 @@ jobs:
             googletest \
             gettext \
             jpeg-turbo \
+            libpng \
             dylibbundler
 
-          brew link --overwrite fltk@1.3
+      - name: Build patched FLTK 1.3
+        run: |
+          set -euxo pipefail
+
+          FLTK_ARCHIVE="$RUNNER_TEMP/fltk-1.3.11-source.tar.bz2"
+          FLTK_SOURCE="$RUNNER_TEMP/fltk-1.3.11"
+
+          curl \
+            --fail \
+            --show-error \
+            --silent \
+            --location \
+            "https://github.com/fltk/fltk/releases/download/release-1.3.11/fltk-1.3.11-source.tar.bz2" \
+            --output "$FLTK_ARCHIVE"
+
+          printf '%s  %s\n' \
+            "ca2e144e5f89173cd094cc273940d56230b1bf613083a0792e6406dc191cd99f" \
+            "$FLTK_ARCHIVE" |
+            shasum -a 256 -c -
+
+          tar \
+            -xjf "$FLTK_ARCHIVE" \
+            -C "$RUNNER_TEMP"
+
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+
+          source_path = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "fltk-1.3.11"
+              / "src"
+              / "Fl_cocoa.mm"
+          )
+          source = source_path.read_text(encoding="utf-8")
+
+          start_marker = (
+              "        inputSources = "
+              "TISCreateInputSourceList(filter, false);\n"
+          )
+          end_marker = "        CFRelease(inputSources);\n"
+
+          replacement = textwrap.indent(textwrap.dedent("""\
+                inputSources = TISCreateInputSourceList(filter, false);
+                CFRelease(filter);
+
+                // A system with only an input method can have no enabled
+                // keyboard-layout sources. Use the saved ASCII layout only
+                // for this application's text input context in that case.
+                if (inputSources == NULL) {
+                  TISInputSourceRef asciiLayout;
+
+                  asciiLayout =
+                    TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+                  if (asciiLayout != NULL) {
+                    const void *sources[] = { asciiLayout };
+                    inputSources =
+                      CFArrayCreate(NULL, sources, 1, &kCFTypeArrayCallBacks);
+                    CFRelease(asciiLayout);
+                  }
+                }
+
+                if (inputSources != NULL) {
+                  TSMSetDocumentProperty(
+                    doc, kTSMDocumentEnabledInputSourcesPropertyTag,
+                    sizeof(CFArrayRef), &inputSources);
+                  CFRelease(inputSources);
+                }
+          """), "        ")
+
+          start_count = source.count(start_marker)
+          end_count = source.count(end_marker)
+          if start_count != 1 or end_count != 1:
+              raise SystemExit(
+                  "Expected exactly one FLTK input-source block; "
+                  f"found starts={start_count}, ends={end_count}."
+              )
+
+          start = source.index(start_marker)
+          end = source.index(end_marker, start) + len(end_marker)
+
+          source_path.write_text(
+              source[:start] + replacement + source[end:],
+              encoding="utf-8",
+          )
+
+          print("Applied FLTK empty-keyboard-layout compatibility patch.")
+          PY
+
+          (
+            cd "$FLTK_SOURCE"
+
+            MACOSX_DEPLOYMENT_TARGET=15.0 \
+            CPPFLAGS="$(
+              printf '%s ' \
+                "-I$(brew --prefix jpeg-turbo)/include" \
+                "-I$(brew --prefix libpng)/include"
+            )" \
+            LDFLAGS="$(
+              printf '%s ' \
+                "-L$(brew --prefix jpeg-turbo)/lib" \
+                "-L$(brew --prefix libpng)/lib"
+            )" \
+            ./configure \
+              --prefix="$FLTK_PREFIX" \
+              --enable-threads \
+              --enable-shared
+
+            make -j3
+            make install
+          )
+
+          test -f "$FLTK_PREFIX/lib/libfltk.1.3.dylib"
+
+          if otool -L "$FLTK_PREFIX/lib/libfltk.1.3.dylib" |
+               grep -q '/opt/homebrew/opt/fltk@1.3'; then
+            echo "The patched FLTK build unexpectedly uses Homebrew FLTK."
+            exit 1
+          fi
 
       - name: Configure TigerVNC
         run: |
@@ -64,7 +184,7 @@ jobs:
 
           CMAKE_PREFIXES="$(
             printf '%s;' \
-              "$(brew --prefix fltk@1.3)" \
+              "$FLTK_PREFIX" \
               "$(brew --prefix pixman)" \
               "$(brew --prefix ffmpeg)" \
               "$(brew --prefix gnutls)" \
@@ -74,6 +194,8 @@ jobs:
               "$(brew --prefix jpeg-turbo)" \
               "$(brew --prefix googletest)"
           )"
+
+          export PATH="$FLTK_PREFIX/bin:$PATH"
 
           cmake \
             -S . \
@@ -104,6 +226,14 @@ jobs:
           test -f "$BINARY"
 
           file "$BINARY"
+          otool -L "$BINARY"
+
+          if ! otool -L "$BINARY" |
+               grep -Fq "$FLTK_PREFIX/lib/libfltk"; then
+            echo "TigerVNC was not linked against the patched FLTK build."
+            exit 1
+          fi
+
           lipo -archs "$BINARY" |
             tr ' ' '\n' |
             grep -qx "$TARGET_ARCH"
