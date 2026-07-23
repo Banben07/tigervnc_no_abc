@@ -100,6 +100,50 @@ jobs:
           )
           source = source_path.read_text(encoding="utf-8")
 
+          declaration_marker = (
+              "static TISCreateInputSourceList_type "
+              "TISCreateInputSourceList;\n"
+          )
+          declaration_addition = (
+              declaration_marker
+              + "typedef CFTypeRef "
+              "(*TISCopyCurrentASCIICapableKeyboardLayoutInputSource_type)"
+              "(void);\n"
+              + "static "
+              "TISCopyCurrentASCIICapableKeyboardLayoutInputSource_type "
+              "TISCopyCurrentASCIICapableKeyboardLayoutInputSource;\n"
+          )
+
+          loader_marker = (
+              "      TISCreateInputSourceList = "
+              "(TISCreateInputSourceList_type)"
+              "Fl_X::get_carbon_function(\"TISCreateInputSourceList\");\n"
+          )
+          loader_addition = (
+              loader_marker
+              + "      "
+              "TISCopyCurrentASCIICapableKeyboardLayoutInputSource = "
+              "(TISCopyCurrentASCIICapableKeyboardLayoutInputSource_type)"
+              "Fl_X::get_carbon_function("
+              "\"TISCopyCurrentASCIICapableKeyboardLayoutInputSource\");\n"
+          )
+
+          declaration_count = source.count(declaration_marker)
+          loader_count = source.count(loader_marker)
+          if declaration_count != 1 or loader_count != 1:
+              raise SystemExit(
+                  "Expected one FLTK TIS declaration and loader; "
+                  f"found declarations={declaration_count}, "
+                  f"loaders={loader_count}."
+              )
+
+          source = source.replace(
+              declaration_marker,
+              declaration_addition,
+              1,
+          )
+          source = source.replace(loader_marker, loader_addition, 1)
+
           start_marker = (
               "        inputSources = "
               "TISCreateInputSourceList(filter, false);\n"
@@ -114,10 +158,13 @@ jobs:
                 // keyboard-layout sources. Use the saved ASCII layout only
                 // for this application's text input context in that case.
                 if (inputSources == NULL) {
-                  TISInputSourceRef asciiLayout;
+                  CFTypeRef asciiLayout = NULL;
 
-                  asciiLayout =
-                    TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+                  if (TISCopyCurrentASCIICapableKeyboardLayoutInputSource !=
+                      NULL) {
+                    asciiLayout =
+                      TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+                  }
                   if (asciiLayout != NULL) {
                     const void *sources[] = { asciiLayout };
                     inputSources =
