@@ -16,11 +16,17 @@ jobs:
     env:
       TARGET_ARCH: arm64
       ARTIFACT_NAME: TigerVNC-macOS-Apple-Silicon-no-ABC
-      FLTK_PREFIX: ${{ runner.temp }}/fltk-patched
 
     steps:
       - name: Check out patched fork
         uses: actions/checkout@v6
+
+      - name: Initialize build paths
+        run: |
+          set -euxo pipefail
+          printf 'FLTK_PREFIX=%s\n' \
+            "$RUNNER_TEMP/fltk-patched" \
+            >> "$GITHUB_ENV"
 
       - name: Verify no-ABC source patch
         run: |
