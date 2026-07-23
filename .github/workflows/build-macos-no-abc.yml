@@ -363,6 +363,19 @@ jobs:
 
           test -f "$EXECUTABLE"
 
+          HIGH_RESOLUTION_CAPABLE="$(
+            plutil \
+              -extract NSHighResolutionCapable \
+              raw \
+              -o - \
+              "$APP/Contents/Info.plist"
+          )"
+
+          if [ "$HIGH_RESOLUTION_CAPABLE" != "true" ]; then
+            echo "The packaged app is not marked as HiDPI capable."
+            exit 1
+          fi
+
           (
             cd "$PACKAGE_DIR"
 
