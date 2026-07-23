@@ -95,6 +95,9 @@ jobs:
         run: |
           set -euxo pipefail
 
+          # The upstream DMG target copies compiled translations but does not
+          # declare them as dependencies, so build the default target first.
+          cmake --build build --parallel 3
           cmake --build build --target dmg --parallel 3
 
           BINARY="build/vncviewer/vncviewer"
