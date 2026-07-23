@@ -22,6 +22,7 @@
 
 #include <assert.h>
 
+#include <cmath>
 #include <stdexcept>
 
 #include <ApplicationServices/ApplicationServices.h>
@@ -34,6 +35,23 @@
 #include "Surface.h"
 
 static CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+
+static void reset_surface_transform(CGContextRef gc)
+{
+  CGAffineTransform transform;
+  CGFloat scale_x, scale_y;
+
+  transform = CGContextGetCTM(gc);
+
+  // FLTK's drawing context includes the display backing scale. Keep that
+  // scale when simplifying the transform, otherwise Retina displays render
+  // the framebuffer at half width and half height.
+  scale_x = std::hypot(transform.a, transform.b);
+  scale_y = std::hypot(transform.c, transform.d);
+
+  CGContextConcatCTM(gc, CGAffineTransformInvert(transform));
+  CGContextScaleCTM(gc, scale_x, scale_y);
+}
 
 static CGImageRef create_image(CGColorSpaceRef lut,
                                const unsigned char* data,
@@ -144,9 +162,9 @@ void Surface::draw(int src_x, int src_y, int dst_x, int dst_y,
 
   CGContextSaveGState(fl_gc);
 
-  // Reset the transformation matrix back to the default identity
-  // matrix as otherwise we get a massive performance hit
-  CGContextConcatCTM(fl_gc, CGAffineTransformInvert(CGContextGetCTM(fl_gc)));
+  // Keep only the display backing scale. More complex transformations cause
+  // a massive performance hit, but dropping the scale breaks Retina output.
+  reset_surface_transform(fl_gc);
 
   // macOS Coordinates are from bottom left, not top left
   dst_y = Fl_Window::current()->h() - (dst_y + dst_h);
@@ -182,9 +200,9 @@ void Surface::blend(int src_x, int src_y, int dst_x, int dst_y,
 
   CGContextSaveGState(fl_gc);
 
-  // Reset the transformation matrix back to the default identity
-  // matrix as otherwise we get a massive performance hit
-  CGContextConcatCTM(fl_gc, CGAffineTransformInvert(CGContextGetCTM(fl_gc)));
+  // Keep only the display backing scale. More complex transformations cause
+  // a massive performance hit, but dropping the scale breaks Retina output.
+  reset_surface_transform(fl_gc);
 
   // macOS Coordinates are from bottom left, not top left
   dst_y = Fl_Window::current()->h() - (dst_y + dst_h);
